@@ -1,4 +1,5 @@
 // Firetruck Pattern #2 using red and green LEDs
+//In the second pattern, the LEDs alternate back and forth at an increasing speed, followed by 3 synchronized blinks before resetting.
 
 #include <msp430fr6989.h>
 #include <stdint.h>
