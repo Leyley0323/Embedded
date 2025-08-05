@@ -1,0 +1,217 @@
+//I created an airport runway control system to coordinate take-off clearances. 
+//The MCU is the central operator and uses the LEDs and buttons to grant requests and 
+//the PC keyboard inputs those requests to use or forfeit access to either runway 1 or 2. 
+//The operator ensures only one runway is active at a time. 
+
+#include <msp430fr6989.h>
+#define redLED BIT0 // Red at P1.0
+#define greenLED BIT7 // Green at P9.7
+#define BUT1 BIT1 // Button S1 at Port 1.1
+#define BUT2 BIT2 // Button S2 at Port 1.2
+
+#define FLAGS UCA1IFG // Contains the transmit & receive flags
+#define RXFLAG UCRXIFG // Receive flag
+#define TXFLAG UCTXIFG // Transmit flag
+#define TXBUFFER UCA1TXBUF // Transmit buffer
+#define RXBUFFER UCA1RXBUF // Receive buffer
+
+// Configure UART to the popular configuration
+// 4800 baud, 8-bit data, LSB first, no parity bits, 1 stop bit
+// no flow control, no oversampling
+void Initialize_UART(void){
+    // Configure pins to UART functionality
+    P3SEL1 &=  ~ (BIT4|BIT5);
+    P3SEL0 |= (BIT4|BIT5);
+    // Main configuration register
+    UCA1CTLW0 = UCSWRST; // Engage reset; change all the fields to zero
+    // Most fields in this register, when set to zero, correspond to the
+    // popular configuration
+    UCA1CTLW0 |= UCSSEL_1; // Set clock to ACLK
+    // Configure the clock dividers and modulators
+    UCA1BRW = 6; // divider
+    UCA1MCTLW = (0xEE << 8); //to move to bits 8-15
+    // Exit the reset state
+    UCA1CTLW0 &=  ~ UCSWRST;
+}
+
+void config_ACLK_to_32KHz_crystal() {
+    // By default, ACLK runs on LFMODCLK at 5MHz/128 = 39 KHz
+
+    // Reroute pins to LFXIN/LFXOUT functionality
+    PJSEL1 &= ~BIT4;
+    PJSEL0 |= BIT4;
+
+    // Wait until the oscillator fault flags remain cleared
+    CSCTL0 = CSKEY; // Unlock CS registers
+    do {
+        CSCTL5 &= ~LFXTOFFG; // Local fault flag
+        SFRIFG1 &= ~OFIFG; // Global fault flag
+    } while((CSCTL5 & LFXTOFFG) != 0);
+    CSCTL0_H = 0; // Lock CS registers
+    return;
+}
+
+
+void uart_write_char(unsigned char ch){
+    // Wait for any ongoing transmission to complete
+    while ( (FLAGS & TXFLAG)==0 ) {}
+    // Copy the byte to the transmit buffer
+    TXBUFFER = ch; // Tx flag goes to 0 and Tx begins!
+    return;
+}
+
+// The function returns the byte; if none received, returns null character
+unsigned char uart_read_char(void){
+    unsigned char temp;
+    // Return null character (ASCII=0) if no byte was received
+    if( (FLAGS & RXFLAG) == 0)
+    return 0;
+    // Otherwise, copy the received byte (this clears the flag) and return it
+    temp = RXBUFFER;
+    return temp;
+}
+
+void uart_write_string (char * str){
+    while(*str != '\0'){
+        uart_write_char(*str);
+        str++;
+    }
+}
+
+void uart_write_uint16 (unsigned int n){
+    if(n >= 10){
+        uart_write_uint16(n/10); // gives higher digits
+    }
+    uart_write_char((n % 10) + '0'); // gives last digit
+}
+
+
+unsigned char runway = 0;
+unsigned char state = 0;
+
+int main(void)
+{
+   WDTCTL = WDTPW | WDTHOLD;   // stop watchdog timer
+    PM5CTL0 &= ~LOCKLPM5; // Enable GPIO pins
+
+
+     P1DIR |= redLED; // Pins as output
+     P9DIR |= greenLED;
+     P1OUT &= ~redLED; // Red on
+     P9OUT &= ~greenLED; // Green off
+
+     P1DIR &= ~(BUT1|BUT2);
+     P1REN |= (BUT1|BUT2); // 1: enable built-in resistors
+     P1OUT |= (BUT1|BUT2); // 1: built-in resistor is pulled up to Vcc
+
+     config_ACLK_to_32KHz_crystal();
+     Initialize_UART();
+
+     uart_write_string("\033[1;1H");
+     uart_write_string("\033[2J");
+     uart_write_string("ORLANDO EXECUTIVE AIRPORT RUNWAY CONTROL \n\n\r");
+     uart_write_string("\t\t Runway 1    Runway 2\n\r");
+     uart_write_string("Request (RQ):\t    1\t\t3 \n\r");
+     uart_write_string("Forfeit (FF):\t    7\t\t9 \n \n \n\r");
+     uart_write_string("--------\t \t -------- \n\r");
+     uart_write_string("Runway 1\t  \t Runway 2\n\r");
+     uart_write_string("--------\t \t -------- \n\r");
+
+     for(;;){
+
+             unsigned char r = uart_read_char();
+             if(r == '1'){ //runway 1 request
+                 uart_write_string("\033[11;1H");
+                 uart_write_string("Requested\r\n");
+                 P1OUT |= redLED;
+                 runway = 0;
+
+             } else if(r == '7'){ //forfeit runway 1
+                 P1OUT &= ~redLED;
+
+                 uart_write_string("\033[11;1H");
+                 uart_write_string("\033[2K");    // Clear "Requested"
+
+                 uart_write_string("\033[12;1H");
+                 uart_write_string("\033[2K");    // Clear "In use"
+
+                 uart_write_string("\033[13;1H");
+                 uart_write_string("\033[2K"); // Clear "Inquiry"
+                 runway = 0;
+                 state = 0;
+             }else if((P1IN & BUT1) == 0 ){
+
+                  if(state == 0 && runway != 2){
+                      __delay_cycles(10000); //debounce
+                      uart_write_string("\033[12;1H");
+                      uart_write_string("In use\r\n");
+                      runway = 1;
+                      state = 1;
+                  }
+
+                  else if(state == 1){
+                      __delay_cycles(50000); //debounce
+                      runway = 0;
+                      state = 0;
+                      P1OUT |= redLED;
+                      uart_write_string("\033[13;1H");
+                      uart_write_string("*** Inquiry ***\r\n");
+
+                  }
+             }else if(r == '3'){
+
+                 uart_write_string("\033[11;25H");
+                 uart_write_string("Requested\r\n");
+
+                 P9OUT |= greenLED;
+                 runway = 0;
+             }else if (r == '9'){
+                 P9OUT &= ~greenLED;
+
+                 uart_write_string("\033[11;25H");
+                 uart_write_string("\033[2K");     // Clear "Requested"
+
+                 uart_write_string("\033[12;25H");
+                 uart_write_string("\033[2K");     // Clear "In use"
+
+                 uart_write_string("\033[13;25H");
+                 uart_write_string("\033[2K"); // Clear "Inquiry"
+
+                 runway = 0;
+                 state = 0;
+             } else if ((P1IN & BUT2) == 0){
+
+                 if(state == 0 && runway != 1){
+
+                     __delay_cycles(10000); //debounce
+                     uart_write_string("\033[12;25H");
+                     uart_write_string("In use\r\n");
+
+                     runway = 2;
+                     state = 2;
+                 }
+
+                 else if(state == 2){
+                     __delay_cycles(200000); //debounce
+                     runway = 0;
+                     state = 0;
+                     P9OUT |= greenLED;
+                     uart_write_string("\033[13;25H");
+                     uart_write_string("*** Inquiry ***\r\n");
+
+                 }
+             }
+
+             if(runway==1){
+                 P1OUT ^= redLED;
+                 __delay_cycles(500000);
+             }else if (runway==2 && runway !=0){
+                 P9OUT ^= greenLED;
+                 __delay_cycles(500000);
+             }
+
+     }
+
+
+    return 0;
+}
