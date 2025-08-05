@@ -1,0 +1,156 @@
+//I converted both the vertical and horizontal analog signals of the joystick on a booster pack. 
+//I added the required bit fields to the initialize ADC function to support the extra data, then added the conversion to the main function. 
+//After testing the 4 directions (left, right, top and bottom) I received the data and displayed it via UART.
+
+#include <msp430fr6989.h>
+#define redLED BIT0
+
+#define FLAGS UCA1IFG // Contains the transmit & receive flags
+#define RXFLAG UCRXIFG // Receive flag
+#define TXFLAG UCTXIFG // Transmit flag
+#define TXBUFFER UCA1TXBUF // Transmit buffer
+#define RXBUFFER UCA1RXBUF // Receive buffer
+
+void Initialize_ADC(){
+    // Configure the pins to analog functionality
+    // X-axis: A10/P9.2, for A10 (P9DIR=x, P9SEL1=1, P9SEL0=1)
+    P9SEL1 |= BIT2;
+    P9SEL0 |= BIT2;
+    //Y axis: A4/P8.7
+    P8SEL1 |= BIT7;
+    P8SEL0 |= BIT7;
+
+    // Turn on the ADC module
+    ADC12CTL0 |= ADC12ON;
+
+    // Turn off ENC (Enable Conversion) bit while modifying the configuration
+    ADC12CTL0 &= ~ADC12ENC;
+
+    //*************** ADC12CTL0 ***************
+    // Set ADC12SHT0 (select the number of cycles that you computed)
+    ADC12CTL0 |= ADC12SHT0_2; // 3us * 5.4MHz = 16 cycles
+    // Set the bit ADC12MSC (Multiple Sample and Conversion)
+    ADC12CTL0 |= ADC12MSC;
+
+    //*************** ADC12CTL1 ***************
+    // Set ADC12SHS (select ADC12SC bit as the trigger)
+    // Set ADC12SHP bit
+    // Set ADC12DIV (select the divider you determined)
+    // Set ADC12SSEL (select MODOSC)
+    ADC12CTL1 |= ADC12SHS_0 | ADC12SHP | ADC12DIV_0 | ADC12SSEL_0;
+    // Set ADC12CONSEQ (select sequence-of-channels)
+    ADC12CTL1 |= ADC12CONSEQ_1;
+
+    //*************** ADC12CTL2 ***************
+    // Set ADC12RES (select 12-bit resolution)
+    // Set ADC12DF (select unsigned binary format)
+    ADC12CTL2 |= ADC12RES_2;
+    ADC12CTL2 &= ~ ADC12DF;
+
+    //*************** ADC12CTL3 ***************
+    // Set ADC12CSTARTADD to 0 (first conversion in ADC12MEM0)
+    ADC12CTL3 &= ~ADC12CSTARTADD0;
+
+    //*************** ADC12MCTL0 ***************
+    // Set ADC12VRSEL (select VR+=AVCC, VR-=AVSS)
+    // Set ADC12INCH (select channel A10)
+    // Turn on ENC (Enable Conversion) bit at the end of the configuration
+    ADC12MCTL0 |= ADC12VRSEL_0 | ADC12INCH_10;
+
+    //*************** ADC12MCTL1 ***************
+    // Set ADC12VRSEL (select VR+=AVCC, VR-=AVSS)
+    // Set ADC12INCH (select the analog channel that you found)
+    // Set ADC12EOS (last conversion in ADC12MEM1)
+    ADC12MCTL1 |= ADC12VRSEL_0 | ADC12EOS | ADC12INCH_4;
+
+    ADC12CTL0 |= ADC12ENC;
+    return;
+
+}
+
+// 9600 baud, 8-bit data, LSB first, no parity bits, 1 stop bit
+// no flow control, oversampling reception
+// Clock: SMCLK @ 1 MHz (1,000,000 Hz)
+void Initialize_UART(void){
+    P3SEL1 &=  ~ (BIT4|BIT5);
+    P3SEL0 |= (BIT4|BIT5);
+
+    UCA1CTLW0 = UCSWRST; // Engage reset; change all the fields to zero
+    UCA1CTLW0 |= UCSSEL_2; // Set clock to SMCLK
+    UCA1BRW = 6; // divider
+    // Modulators: UCBRF = 8 = 1000 --> UCBRF3 (bit #3)
+    // UCBRS = 0x20 = 0010 0000 = UCBRS5 (bit #5)
+    UCA1MCTLW = UCBRF3 | UCBRS5 | UCOS16;
+    // Exit the reset state
+    UCA1CTLW0 &=  ~ UCSWRST;
+}
+
+unsigned char uart_read_char(void){
+    unsigned char temp;
+    // Return null character (ASCII=0) if no byte was received
+    if( (FLAGS & RXFLAG) == 0)
+    return 0;
+    // Otherwise, copy the received byte (this clears the flag) and return it
+    temp = RXBUFFER;
+    return temp;
+}
+
+//send a string over UART
+void uart_write_string (char * str){
+    while(*str != '\0'){
+        uart_write_char(*str);
+        str++;
+    }
+}
+
+//sends a 16 bit int as ASCII #
+void uart_write_uint16 (unsigned int n){
+    if(n >= 10){
+        uart_write_uint16(n/10); // gives higher digits
+    }
+    uart_write_char((n % 10) + '0'); // gives last digit
+}
+
+//send one character over UART
+void uart_write_char(unsigned char ch){
+    // Wait for any ongoing transmission to complete
+    while ( (FLAGS & TXFLAG)==0 ) {}
+    // Copy the byte to the transmit buffer
+    TXBUFFER = ch; // Tx flag goes to 0 and Tx begins!
+    return;
+}
+
+int main(){
+    WDTCTL = WDTPW | WDTHOLD;   // stop watchdog timer
+    PM5CTL0 &= ~LOCKLPM5; // Enable GPIO pins
+
+    Initialize_UART();
+    Initialize_ADC();
+     P1DIR |= redLED;
+
+     uart_write_string("\033[1;1H");
+     uart_write_string("\033[2J");
+
+    for(;;){
+        ADC12CTL0 |= ADC12SC;
+
+        while(ADC12CTL1 & ADC12BUSY);
+        unsigned int x = ADC12MEM0;
+        unsigned int y = ADC12MEM1;
+
+            uart_write_string("X: ");
+            uart_write_uint16(x);
+
+            uart_write_string("\t");
+
+            uart_write_string("Y: ");
+            uart_write_uint16(y);
+
+            uart_write_string("\r\n");
+
+            P1OUT ^= redLED;
+            __delay_cycles(500000);
+
+
+    }
+}
