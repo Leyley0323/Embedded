@@ -1,0 +1,57 @@
+// Firetruck Pattern #2 using red and green LEDs
+
+#include <msp430fr6989.h>
+#include <stdint.h>
+
+#define redLED BIT0 // Red LED at P1.0
+#define greenLED BIT7 // Green LED at P9.7
+
+void main(void) {
+    volatile uint32_t i;
+    volatile uint32_t j;
+    volatile uint8_t k;
+    volatile uint8_t flashes;
+
+    WDTCTL = WDTPW | WDTHOLD; // Stop the Watchdog timer
+    PM5CTL0 &= ~LOCKLPM5; // Disable GPIO power-on default high-impedance mode
+
+    P1DIR |= redLED;
+    P1OUT &= ~redLED;
+
+    P9DIR |= greenLED;
+    P9OUT &= ~greenLED;
+
+    i = 30000;
+    for(;;) {
+        while(i >= 2000) {
+            //Alternate red
+            P1OUT ^= redLED;
+            P9OUT &= ~greenLED;
+            for(j = i; j > 0; j--){}
+
+            //Alternate green
+            P9OUT ^= greenLED;
+            P1OUT &= ~redLED;
+            for(j = i; j > 0; j--){}
+
+            i -= 2000;
+        }
+
+
+        //Blinks
+        for(k = 0; k < 3; k++) {
+            P1OUT &= ~redLED;
+            P9OUT &= ~greenLED;
+            _delay_cycles(300000);
+
+            P1OUT |= redLED;
+            P9OUT |= greenLED;
+            _delay_cycles(300000);
+        }
+
+        // Reset pattern
+        P1OUT &= ~redLED;
+        P9OUT &= ~greenLED;
+        i = 30000;
+    }
+}
