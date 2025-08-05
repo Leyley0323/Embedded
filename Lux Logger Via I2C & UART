@@ -1,0 +1,325 @@
+//The logger records light intensity every minute and also prints the time stamp that the lux was logged.
+//The upper and lower thresholds are set to ±10 lux from the first reading. 
+//This is adjusted for each new reading by printing <Up> or <Down>.
+//The system also allows the user to set the initial time by pressing button S2 and entering 3 – 4 digits via UART. 
+//A timer interrupt keeps track of each update. 
+
+#include <msp430fr6989.h>
+#define BUT1 BIT1 // Button S1 at Port 1.1
+#define BUT2 BIT2 // Button S2 at Port 1.2
+
+#define FLAGS UCA1IFG // Contains the transmit & receive flags
+#define RXFLAG UCRXIFG // Receive flag
+#define TXFLAG UCTXIFG // Transmit flag
+#define TXBUFFER UCA1TXBUF // Transmit buffer
+#define RXBUFFER UCA1RXBUF // Receive buffer
+
+#define SENSOR 0x44 // sensor address
+#define MANUFACT 0x7E // manufacturer ID
+#define DEVICE 0x7F // Device ID
+
+// 9600 baud, 8-bit data, LSB first, no parity bits, 1 stop bit
+// no flow control, oversampling reception
+// Clock: SMCLK @ 1 MHz (1,000,000 Hz)
+void Initialize_UART(void){
+    P3SEL1 &=  ~ (BIT4|BIT5);
+    P3SEL0 |= (BIT4|BIT5);
+
+    UCA1CTLW0 = UCSWRST; // Engage reset; change all the fields to zero
+    UCA1CTLW0 |= UCSSEL_2; // Set clock to SMCLK
+    UCA1BRW = 6; // divider
+    // Modulators: UCBRF = 8 = 1000 --> UCBRF3 (bit #3)
+    // UCBRS = 0x20 = 0010 0000 = UCBRS5 (bit #5)
+    UCA1MCTLW = UCBRF3 | UCBRS5 | UCOS16;
+    // Exit the reset state
+    UCA1CTLW0 &=  ~ UCSWRST;
+}
+
+//send one character over UART
+void uart_write_char(unsigned char ch){
+    // Wait for any ongoing transmission to complete
+    while ( (FLAGS & TXFLAG)==0 ) {}
+    // Copy the byte to the transmit buffer
+    TXBUFFER = ch; // Tx flag goes to 0 and Tx begins!
+    return;
+}
+
+//read one char from UART
+// The function returns the byte; if none received, returns null character
+unsigned char uart_read_char(void){
+    unsigned char temp;
+    // Return null character (ASCII=0) if no byte was received
+    if( (FLAGS & RXFLAG) == 0)
+    return 0;
+    // Otherwise, copy the received byte (this clears the flag) and return it
+    temp = RXBUFFER;
+    return temp;
+}
+
+//send a string over UART
+void uart_write_string (char * str){
+    while(*str != '\0'){
+        uart_write_char(*str);
+        str++;
+    }
+}
+
+//sends a 16 bit int as ASCII #
+void uart_write_uint16 (unsigned int n){
+    if(n >= 10){
+        uart_write_uint16(n/10); // gives higher digits
+    }
+    uart_write_char((n % 10) + '0'); // gives last digit
+}
+
+
+void Initialize_I2C(void) {
+    // Configure the MCU in Master mode
+    // Configure pins to I2C functionality
+    // (UCB1SDA same as P4.0) (UCB1SCL same as P4.1)
+    // (P4SEL1=11, P4SEL0=00) (P4DIR=xx)
+    P4SEL1 |= (BIT1|BIT0);
+    P4SEL0 &= ~(BIT1|BIT0);
+    // Enter reset state and set all fields in this register to zero
+    UCB1CTLW0 = UCSWRST;
+    // Fields that should be nonzero are changed below
+    // (Master Mode: UCMST) (I2C mode: UCMODE_3) (Synchronous mode: UCSYNC)
+    // (UCSSEL 1:ACLK, 2,3:SMCLK)
+    UCB1CTLW0 |= UCMST | UCMODE_3 | UCSYNC | UCSSEL_3;
+    // Clock frequency: SMCLK/8 = 1 MHz/8 = 125 KHz
+    UCB1BRW = 8;
+    // Chip Data Sheet p. 53 (Should be 400 KHz max)
+    // Exit the reset mode at the end of the configuration
+    UCB1CTLW0 &= ~UCSWRST;
+}
+
+// Read a word (2 bytes) from I2C (address, register)
+int i2c_read_word(unsigned char i2c_address, unsigned char i2c_reg, unsigned int * data){
+    unsigned char byte1=0, byte2=0; // Intialize to ensure successful reading
+    UCB1I2CSA = i2c_address; // Set address
+    UCB1IFG &= ~ UCTXIFG0;
+    // Transmit a byte (the internal register address)
+    UCB1CTLW0 |= UCTR;
+    UCB1CTLW0 |= UCTXSTT;
+    while((UCB1IFG & UCTXIFG0)==0) {} // Wait for flag to raise
+    UCB1TXBUF = i2c_reg; // Write in the TX buffer
+    while((UCB1IFG & UCTXIFG0)==0) {} // Buffer copied to shift register;
+    //Tx in progress; set Stop bit
+    // Repeated Start
+    UCB1CTLW0 &= ~UCTR;
+    UCB1CTLW0 |= UCTXSTT;
+    // Read the first byte
+    while((UCB1IFG & UCRXIFG0)==0) {} // Wait for flag to raise
+    byte1 = UCB1RXBUF;
+    // Assert the Stop signal bit before receiving the last byte
+    UCB1CTLW0 |= UCTXSTP;
+    // Read the second byte
+    while((UCB1IFG & UCRXIFG0)==0) {} // Wait for flag to raise
+    byte2 = UCB1RXBUF;
+    while((UCB1CTLW0 & UCTXSTP)!=0) {}
+    while((UCB1STATW & UCBBUSY)!=0) {}
+    *data = (byte1 << 8) | (byte2 & (unsigned int)0x00FF);
+    return 0;
+
+}
+
+// Write a word (2 bytes) to I2C (address, register)
+int i2c_write_word(unsigned char i2c_address, unsigned char i2c_reg, unsigned int data){
+    unsigned char byte1, byte2;
+    UCB1I2CSA = i2c_address; // Set I2C address
+    byte1 = (data >> 8) & 0xFF; // MSByte
+    byte2 = data & 0xFF; // LSByte
+    UCB1IFG &= ~ UCTXIFG0;
+    // Write 3 bytes
+    UCB1CTLW0 |= (UCTR | UCTXSTT);
+    while( (UCB1IFG & UCTXIFG0) == 0) {}
+    UCB1TXBUF = i2c_reg;
+    while( (UCB1IFG & UCTXIFG0) == 0) {}
+    UCB1TXBUF = byte1;
+    while( (UCB1IFG & UCTXIFG0) == 0) {}
+    UCB1TXBUF = byte2;
+    while( (UCB1IFG & UCTXIFG0) == 0) {}
+    UCB1CTLW0 |= UCTXSTP;
+    while( (UCB1CTLW0 & UCTXSTP) != 0 ) {}
+    while((UCB1STATW & UCBBUSY)!=0) {}
+    return 0;
+
+}
+
+void config_ACLK_to_32KHz_crystal() {
+    // By default, ACLK runs on LFMODCLK at 5MHz/128 = 39 KHz
+
+    // Reroute pins to LFXIN/LFXOUT functionality
+    PJSEL1 &= ~BIT4;
+    PJSEL0 |= BIT4;
+
+    // Wait until the oscillator fault flags remain cleared
+    CSCTL0 = CSKEY; // Unlock CS registers
+    do {
+        CSCTL5 &= ~LFXTOFFG; // Local fault flag
+        SFRIFG1 &= ~OFIFG; // Global fault flag
+    } while((CSCTL5 & LFXTOFFG) != 0);
+    CSCTL0_H = 0; // Lock CS registers
+    return;
+}
+
+//global variables
+volatile unsigned int s = 0; //seconds
+volatile unsigned int m = 0;//minutes
+volatile unsigned int h = 0; //hours
+volatile int log = 0; // logs lux value every minute
+volatile unsigned int res = 0; // result
+
+volatile unsigned int user = 0;  // user input
+float top = 0; // upper limit
+float bottom = 0; // lower limit
+
+int main(void){
+        WDTCTL = WDTPW | WDTHOLD;   // stop watchdog timer
+        PM5CTL0 &= ~LOCKLPM5; // Enable GPIO pins
+
+        P1DIR &= ~(BUT1|BUT2);
+        P1REN |= (BUT1|BUT2); // 1: enable built-in resistors
+        P1OUT |= (BUT1|BUT2); // 1: built-in resistor is pulled up to Vcc
+        P1IES |= (BUT1|BUT2); // 1: interrupt on falling edge (0 for rising edge)
+        P1IFG &= ~(BUT1|BUT2); // 0: clear the interrupt flags
+        P1IE |= (BUT1|BUT2); // 1: enable the interrupt
+
+        Initialize_UART();
+        Initialize_I2C();
+        config_ACLK_to_32KHz_crystal();
+
+        TA0CCR0 = 32768; // 1 sec
+        TA0CCTL0 |= CCIE; // Enable Channel 0 CCIE bit
+        TA0CCTL0 &= ~CCIFG; // Clear Channel 0 CCIFG bit
+
+        // Timer_A: ACLK, div by 1, up mode, clear TAR
+        TA0CTL = TASSEL_1| ID_0 | MC_1 | TACLR;
+
+
+        i2c_write_word(SENSOR, 0x01, 0x7604);
+        // 0x01 = configuration reg
+        // 0x7604 from table 10 in register table
+
+        uart_write_string("\033[1;1H");
+        uart_write_string("\033[2J");
+
+        uart_write_string("*** Lux Logger ***\r\n");
+
+        _enable_interrupts();
+        float lux = 0.0;
+
+
+        for(;;){
+
+            //when button is pressed the following is executed
+            if(user == 2){
+               user = 0;
+               uart_write_string("Enter the time... (3 or 4 digits then hit Enter)\n\r");
+
+               //handles to user input
+               unsigned int temp = 0;
+               unsigned char ch;
+               for(;;){
+                   ch = uart_read_char();
+                   if(ch == '\r'){ //checks if user pressed enter
+                      break;
+                   } else if (ch >= '0' && ch <= '9'){
+                      temp = temp * 10 + (ch - '0'); // converts to int digit by digit
+                      }
+                }
+
+                  h = (temp >= 100) ? (temp/100) : (temp/10); // handles if hour is 1 or 2 digits
+                  m = (temp >= 100) ? (temp%100) : (temp%10); // handles if min is 1 or 2 digits
+                  if(h > 12) h = h - 12; // keeps format
+                  if(m > 59) m = m - 59;
+
+                  uart_write_string("Time is set to ");
+                  uart_write_uint16(h);
+                  uart_write_char(':');
+                  if(m < 10) uart_write_char('0');
+                  uart_write_uint16(m);
+                  uart_write_string("\r\n\n ");
+
+
+                                }
+
+            //handles sensor reading lux every minute
+            if(log == 1){
+                log = 0;
+
+                i2c_read_word(SENSOR, 0x00, &res); //0x00 = result register
+                unsigned int mantissa = res & 0x0FFF; //only keep the 12 bit result
+                lux = mantissa * 1.28;
+
+                //print time
+                if (h < 10) uart_write_char(' ');
+                uart_write_uint16(h);
+                uart_write_char(':');
+                if (m < 10) uart_write_char('0');
+                uart_write_uint16(m);
+                uart_write_char(' ');
+                uart_write_string("\t");
+
+                //print lux
+                unsigned int i = (unsigned int)lux; // turns float into int
+                uart_write_uint16(i);
+                uart_write_string("\t");
+
+                //set upper and lower limits
+                if(top == 0 && bottom == 0){
+                    top = lux + 10;
+                    bottom = lux - 10;
+                } else{
+                    if(lux > top){
+                        uart_write_string("\t\t <Up>");
+                        top = lux + 10;
+                        bottom = lux - 10;
+                    } else if(lux < bottom){
+                        uart_write_string("\t\t <Down>");
+                        top = lux + 10;
+                        bottom = lux - 10;
+                    }
+                }
+                uart_write_string("\r\n");
+                __delay_cycles(1000000);
+            }
+        }
+
+}
+
+//******* Writing the BUTTON ISR *******
+    #pragma vector = PORT1_VECTOR // Link the ISR to the vector
+    __interrupt void Port1_ISR() {
+    // Detect button 2 interrupt flag
+
+        if ((P1IFG & BUT2) != 0) {
+            P1IFG &= ~BIT2;
+            __delay_cycles(200000);//debounce
+            user = 2;
+
+        }
+    }
+
+
+//******* Writing the TIMER ISR *******
+#pragma vector = TIMER0_A0_VECTOR // Link the ISR to the vector
+__interrupt void Timer_A_ISR(void) {
+// Interrupt response goes here
+    TA0CCTL0 &= ~CCIFG;
+
+        s++;
+        if(s >= 60){
+            s = 0;
+            m ++;
+            log = 1;
+            if(m >= 60){
+                m = 0;
+                h ++;
+                     if(h >= 12){
+                         h = 1;
+                     }
+
+                }
+            }
+        }
