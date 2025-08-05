@@ -1,4 +1,5 @@
 //Fire Truck Pattern #1 using red and green LEDS
+//In the first pattern the red and green LEDs flash rapidly while alternating, then speeds up and repeats. 
 
 #include <msp430fr6989.h>
 #include <stdint.h>
