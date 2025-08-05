@@ -1,0 +1,263 @@
+//design a utility chronometer that functions as both a stopwatch and a clock. 
+//Button 1 stops/resumes the timer when pressed and also clears and resets the timer when held.
+//Holding button 2 fast forwards the timer so it can be set to a certain time. 
+//Holding button 2 and pressing button one rewinds the timer to a desired value. 
+//This code utilizes symbols on the display such as the exclamation point, period, colon and clock symbol as shown below.
+
+// Sample code that prints 430 on the LCD monitor
+#include <msp430fr6989.h>
+#define redLED BIT0 // Red at P1.0
+#define greenLED BIT7 // Green at P9.7
+
+#define BUT1 BIT1 // Button S1 at Port 1.1
+#define BUT2 BIT2 // Button S2 at Port 1.2
+
+void Initialize_LCD();
+
+// The array has the shapes of the digits (0 to 9)
+const unsigned char LCD_Shapes[10] = {0xFC, 0x60, 0xDB, 0xF1, 0x67, 0xB7, 0xBF, 0xE0, 0xFF, 0xF7};
+volatile unsigned int n = 0;
+
+void config_ACLK_to_32KHz_crystal() {
+    // By default, ACLK runs on LFMODCLK at 5MHz/128 = 39 KHz
+
+    // Reroute pins to LFXIN/LFXOUT functionality
+    PJSEL1 &= ~BIT4;
+    PJSEL0 |= BIT4;
+
+    // Wait until the oscillator fault flags remain cleared
+    CSCTL0 = CSKEY; // Unlock CS registers
+    do {
+        CSCTL5 &= ~LFXTOFFG; // Local fault flag
+        SFRIFG1 &= ~OFIFG; // Global fault flag
+    } while((CSCTL5 & LFXTOFFG) != 0);
+    CSCTL0_H = 0; // Lock CS registers
+    return;
+}
+
+volatile unsigned int s = 0; // seconds
+volatile unsigned int m = 0; // minutes
+volatile unsigned int h = 0; // hours
+volatile unsigned int meterON = 0; // state of chronometer
+volatile unsigned int length = 0; // used for long presses
+
+
+int main(void) {
+    WDTCTL = WDTPW | WDTHOLD; // Stop WDT
+    PM5CTL0 &= ~LOCKLPM5; // Enable GPIO pins
+
+    P1DIR |= redLED; // Pins as output
+    P9DIR |= greenLED;
+    P1OUT &= ~redLED; // Red on
+    P9OUT &= ~greenLED; // Green off
+
+    //configure buttons
+            P1DIR &= ~(BUT1|BUT2);
+            P1REN |= (BUT1|BUT2); // 1: enable built-in resistors
+            P1OUT |= (BUT1|BUT2); // 1: built-in resistor is pulled up to Vcc
+            P1IES |= (BUT1|BUT2); // 1: interrupt on falling edge (0 for rising edge)
+            P1IFG &= ~(BUT1|BUT2); // 0: clear the interrupt flags
+            P1IE |= (BUT1|BUT2); // 1: enable the interrupt
+
+            // Configure ACLK to the 32 KHz crystal
+            config_ACLK_to_32KHz_crystal();
+
+            TA0CCR0 = 32768; // 1 sec
+            TA0CCTL0 |= CCIE; // Enable Channel 0 CCIE bit
+            TA0CCTL0 &= ~CCIFG; // Clear Channel 0 CCIFG bit
+
+            // Timer_A: ACLK, div by 1, up mode, clear TAR
+            TA0CTL = TASSEL_1| ID_0 | MC_1 | TACLR;
+
+    // Initializes the LCD_C module
+    Initialize_LCD();
+
+    // The line below can be used to clear all the segments
+    //LCDCMEMCTL = LCDCLRM; // Clears all the segments
+
+    LCDM3 |= BIT3;// clock symbol on
+
+    // Enable the global interrupt bit (call an intrinsic function)
+        _enable_interrupts();
+
+    // polling the buttons
+    for(;;) {
+        if((P1IN & BUT1)== 0 && (P1IN & BUT2)!=0){// but1 long press -> reset
+
+                       length ++;
+                                 if(length > 50000){
+                                       s=0;
+                                       m=0;
+                                       h=0;
+                                       lcd_write_uint16 ();
+
+                                       meterON = 0;
+                                       LCDM3 |= BIT0; // !
+                                       LCDM3 &=~ BIT3; // turn clock symbol off
+
+                                       length = 0;
+                                 }
+                             }
+
+
+        else if((P1IN & BUT2)== 0 && (P1IN & BUT1)!= 0){
+                    __delay_cycles(200000); // debouncing and making increments clearer
+                                 s+=10; // speeds up counting
+                                 if(s >= 60){
+                                    s = 0;
+                                    m ++;
+                                    if(m >= 60){
+                                      m = 0;
+                                      h ++;
+                                         if(h >= 9){
+                                            h = 0;
+                                         }
+
+                                       }
+                                    }
+                                 lcd_write_uint16 ();
+                                }
+
+
+
+                    //rewind
+        else if((P1IN & BUT2)== 0 && (P1IN & BUT1)== 0){
+                              __delay_cycles(200000);
+                              if(s < 10){ // 10 since we are fast forwarding by 10
+                                  // prevent overflow when rewinding
+                                  s = 60 - (10-s);
+                                  if(m==0){
+                                      m=59;
+                                      if(h==0){
+                                          h=9;
+                                      } else{
+                                          h--;
+                                      }
+                                  } else {
+                                      m--;
+                                  }
+                              }
+                              else {
+                                  s-=10;
+                              }
+                              lcd_write_uint16 ();
+
+                          }
+
+
+
+    }
+
+    return 0;
+}
+
+//**********************************************************
+// Initializes the LCD_C module
+// *** Source: Function obtained from MSP430FR6989’s Sample Code ***
+void Initialize_LCD() {
+    PJSEL0 = BIT4 | BIT5; // For LFXT
+
+    LCDCPCTL0 = 0xFFD0;
+    LCDCPCTL1 = 0xF83F;
+    LCDCPCTL2 = 0x00F8;
+
+    // Configure LFXT 32kHz crystal
+    CSCTL0_H = CSKEY >> 8; // Unlock CS registers
+    CSCTL4 &=  ~LFXTOFF; // Enable LFXT
+    do {
+        CSCTL5 &=  ~LFXTOFFG; // Clear LFXT fault flag
+        SFRIFG1 &=  ~OFIFG;
+    }while (SFRIFG1 & OFIFG); // Test oscillator fault flag
+
+    CSCTL0_H = 0; // Lock CS registers
+
+    // Initialize LCD_C
+    // ACLK, Divider = 1, Pre-divider = 16; 4-pin MUX
+    LCDCCTL0 = LCDDIV__1 | LCDPRE__16 | LCD4MUX | LCDLP;
+
+    // VLCD generated internally,
+    // V2-V4 generated internally, v5 to ground
+    // Set VLCD voltage to 2.60v
+    // Enable charge pump and select internal reference for it
+    LCDCVCTL = VLCD_1 | VLCDREF_0 | LCDCPEN;
+    LCDCCPCTL = LCDCPCLKSYNC; // Clock synchronization enabled
+    LCDCMEMCTL = LCDCLRM; // Clear LCD memory
+    //Turn LCD on (do this at the end!)
+    LCDCCTL0 |= LCDON;
+    return;
+}
+
+void lcd_write_uint16 (){
+    unsigned int time = h * 1000 + m * 100 + s;
+    LCDM6 = LCD_Shapes[(time/10000)%10];//A2
+    LCDM4 = LCD_Shapes[(time/1000)%10]; // A3
+    LCDM19 = LCD_Shapes[(time/100)%10]; //A4
+    LCDM20 |= BIT0; // decimal
+    LCDM15 = LCD_Shapes[(time/10)%10]; //A5
+    LCDM8 = LCD_Shapes[time%10]; // A6
+}
+
+
+//******* Writing the BUTTON ISR *******
+    #pragma vector = PORT1_VECTOR // Link the ISR to the vector
+    __interrupt void Port1_ISR() {
+    // Interrupt response goes here
+        // Detect button 1 interrupt flag
+        if ((P1IFG & BUT1) != 0) {
+            // Button 1 action
+            length = 0;
+            P1IFG &= ~ BUT1;
+            if(meterON != 0){ // turns on and off when but1 is pressed
+                TA0CTL &= ~ MC_1; // stop timer
+                meterON = 0;
+                LCDM3 |= BIT0; // !
+                LCDM3 &=~ BIT3; // turn clock symbol off
+            }else if(meterON == 0) {
+                TA0CTL |=  MC_1;
+                meterON = 1;
+                LCDM3 |= BIT3; // clock
+                LCDM3 &=~ BIT0; // turn ! off
+            }
+           lcd_write_uint16();
+
+        }
+
+        // Detect button 2 interrupt flag
+        if ((P1IFG & BUT2) != 0) {
+            // Button 2 action
+            P1IFG &= ~ BUT2;
+            lcd_write_uint16();
+
+
+            }
+
+    }
+
+    //******* Writing the TIMER ISR *******
+    #pragma vector = TIMER0_A0_VECTOR // Link the ISR to the vector
+    __interrupt void T0A0_ISR() {
+    // Interrupt response goes here
+        TA0CCTL0 &= ~CCIFG;
+        LCDM7 ^= BIT2; // colon
+        lcd_write_uint16();
+        n++;
+        if(meterON){
+            s++;
+            if(s >= 60){
+                s = 0;
+                m ++;
+                if(m >= 60){
+                    m = 0;
+                    h ++;
+                    if(m >= 60){
+                         m = 0;
+                         h ++;
+                         if(h >= 24){
+                             h = 0;
+                         }
+
+                    }
+                }
+            }
+        }
+    }
