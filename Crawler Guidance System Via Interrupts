@@ -1,0 +1,117 @@
+//Button 1 decrements the state and also controls the red LED whereas button 2 increments the state and also controls the green LED. 
+//The red LED means a left correction is needed, the green LED means right correction is needed, and both flashing slowly means the crawler is on track. 
+//I used Timer_A in up mode with interrupts to handle the LED blinking, and button interrupts to change the state of the LEDs. 
+
+#include <msp430fr6989.h>
+#define redLED BIT0 // Red LED at P1.0
+#define greenLED BIT7 // Green LED at P9.7
+
+#define BUT1 BIT1 // Button S1 at Port 1.1
+#define BUT2 BIT2 // Button S2 at Port 1.2
+
+void config_ACLK_to_32KHz_crystal() {
+    // By default, ACLK runs on LFMODCLK at 5MHz/128 = 39 KHz
+
+    // Reroute pins to LFXIN/LFXOUT functionality
+    PJSEL1 &= ~BIT4;
+    PJSEL0 |= BIT4;
+
+    // Wait until the oscillator fault flags remain cleared
+    CSCTL0 = CSKEY; // Unlock CS registers
+    do {
+        CSCTL5 &= ~LFXTOFFG; // Local fault flag
+        SFRIFG1 &= ~OFIFG; // Global fault flag
+    } while((CSCTL5 & LFXTOFFG) != 0);
+    CSCTL0_H = 0; // Lock CS registers
+    return;
+}
+
+void main(void) {
+     WDTCTL = WDTPW | WDTHOLD; // Stop the Watchdog timer
+    PM5CTL0 &= ~LOCKLPM5; // Enable the GPIO pins
+
+    P1DIR |= redLED; // Configure pin as output
+    P9DIR |= greenLED; // Configure pin as output
+    P1OUT &= ~redLED; // Turn LED Off
+    P9OUT &= ~greenLED; // Turn LED On
+
+    //configure buttons
+    P1DIR &= ~(BUT1|BUT2);
+    P1REN |= (BUT1|BUT2); // 1: enable built-in resistors
+    P1OUT |= (BUT1|BUT2); // 1: built-in resistor is pulled up to Vcc
+    P1IES |= (BUT1|BUT2); // 1: interrupt on falling edge (0 for rising edge)
+    P1IFG &= ~(BUT1|BUT2); // 0: clear the interrupt flags
+    P1IE |= (BUT1|BUT2); // 1: enable the interrupt
+
+    // Configure ACLK to the 32 KHz crystal
+    config_ACLK_to_32KHz_crystal();
+
+    // Configure Channel 0 for up mode with interrupts
+        blinkSpeed();
+        TA0CCTL0 |= CCIE; // Enable Channel 0 CCIE bit
+        TA0CCTL0 &= ~CCIFG; // Clear Channel 0 CCIFG bit
+
+        // Timer_A: ACLK, div by 1, up mode, clear TAR
+        TA0CTL = TASSEL_1| ID_0 | MC_1 | TACLR;
+
+
+   _low_power_mode_3 (); // only ACLK is on
+
+    }
+
+     volatile unsigned int state = 4; // defaultly RG state
+
+     //helper function to determine speed of blinks
+     void blinkSpeed(){
+         if(state == 4){ // turns off LEDs to prevent alternating blinks
+             P1OUT &= ~redLED;
+             P9OUT &= ~ greenLED;
+             TA0CCR0 = 32768; // RG state
+         } else if(state == 3 || state == 5){
+             TA0CCR0 = 16384; // R+ and G+ state
+         }else if (state == 2 || state == 6){
+             TA0CCR0 = 8192; //R++ and G++ state
+         }else if(state == 1 || state == 7){
+             TA0CCR0 = 4096; //R+++ and G+++ state
+         }
+     }
+
+    //******* Writing the BUTTON ISR *******
+    #pragma vector = PORT1_VECTOR // Link the ISR to the vector
+    __interrupt void Port1_ISR() {
+    // Interrupt response goes here
+        // Detect button 1 interrupt flag
+        if ((P1IFG & BUT1) != 0) {
+            // Button 1 action
+            if(state > 1) state --;
+            P1IFG &= ~ BUT1;
+            _delay_cycles(200000); // to handle bouncing
+            blinkSpeed();
+        }
+        // Detect button 2 interrupt flag
+        if ((P1IFG & BUT2) != 0) {
+            // Button 2 action
+            if(state < 7) state ++;
+            P1IFG &= ~ BUT2;
+            _delay_cycles(200000); // to handle bouncing
+            blinkSpeed();
+            }
+
+        }
+
+    //******* Writing the TIMER ISR *******
+    #pragma vector = TIMER0_A0_VECTOR // Link the ISR to the vector
+    __interrupt void T0A0_ISR() {
+    // Interrupt response goes here
+        TA0CCTL0 &= ~CCIFG;
+        if(state == 4){ // RG
+            P1OUT ^= redLED;
+            P9OUT ^= greenLED;
+        }else if(state >= 1 && state <= 3){ // R+ - R+++
+            P1OUT ^= redLED;
+            P9OUT &= ~greenLED;
+        } else if(state >= 5 && state <= 7){ // G+ - G+++
+            P1OUT &= ~redLED;
+            P9OUT ^= greenLED;
+        }
+}
